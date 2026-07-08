@@ -1,4 +1,4 @@
-
+import curses
 import random
 import time
 
@@ -14,7 +14,8 @@ class DodgerGame:
         curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)  # UI / Text
         
         self.reset_game()
- def reset_game(self):
+
+    def reset_game(self):
         self.stdscr.clear()
         self.score = 0
         self.speed = 100         # ms delay per frame
@@ -148,7 +149,6 @@ class DodgerGame:
             if not self.game_over:
                 self.draw()
 
-   
 def main(stdscr):
     game = DodgerGame(stdscr)
     game.run()
