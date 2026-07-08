@@ -1,6 +1,5 @@
 import curses
 import random
-import time
 
 class DodgerGame:
     def __init__(self, stdscr):
@@ -12,24 +11,24 @@ class DodgerGame:
         curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)   # Player Ship
         curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Asteroids
         curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)  # UI / Text
+        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK) # Lasers
         
         self.reset_game()
 
     def reset_game(self):
         self.stdscr.clear()
         self.score = 0
-        self.speed = 100         # ms delay per frame
-        self.spawn_rate = 10     # % chance to spawn an asteroid per frame
+        self.speed = 100         
+        self.spawn_rate = 10     
         self.paused = False
         self.game_over = False
         
-        # Player starting position (bottom center)
         self.player_x = self.sw // 2
         self.player_y = self.sh - 2
-        self.ship_sprite = "<A>" # The player is 3 characters wide
+        self.ship_sprite = "<A>" 
         
-        # List to track all active asteroids: [y, x]
         self.asteroids = []
+        self.lasers = []  # New: Track active lasers
 
     def process_input(self):
         next_key = self.stdscr.getch()
@@ -43,41 +42,71 @@ class DodgerGame:
             return
 
         if not self.paused:
-            # Move left/right, keeping the 3-char ship safely on screen
             if next_key == curses.KEY_LEFT:
                 self.player_x = max(2, self.player_x - 2)
             elif next_key == curses.KEY_RIGHT:
                 self.player_x = min(self.sw - 4, self.player_x + 2)
+            elif next_key == ord(' '):  # New: Fire laser on spacebar
+                # Spawn laser just above the center of the ship
+                self.lasers.append([self.player_y - 1, self.player_x])
 
     def update_logic(self):
         if self.paused:
             return
 
-        # 1. Move existing asteroids down
+        # 1. Move lasers up
+        surviving_lasers = []
+        for ly, lx in self.lasers:
+            ly -= 1
+            if ly > 0:  # Keep if it hasn't hit the top of the screen
+                surviving_lasers.append([ly, lx])
+        self.lasers = surviving_lasers
+
+        # 2. Move asteroids down & check player collision
         surviving_asteroids = []
         for ay, ax in self.asteroids:
-            ay += 1  # Gravity pulls them down
+            ay += 1 
             
             # Check collision with player
-            # If the asteroid is on the player's row and within the ship's 3-char width
             if ay == self.player_y and (self.player_x - 1 <= ax <= self.player_x + 1):
                 self.game_over = True
                 return
                 
-            # If asteroid hits the bottom, player scores a point
             if ay >= self.sh - 1:
                 self.score += 1
-                
-                # Increase difficulty every 10 points
                 if self.score % 10 == 0:
-                    self.spawn_rate = min(40, self.spawn_rate + 2) # Spawn more often
-                    self.speed = max(40, self.speed - 5)           # Fall faster
+                    self.spawn_rate = min(40, self.spawn_rate + 2)
+                    self.speed = max(40, self.speed - 5)
             else:
                 surviving_asteroids.append([ay, ax])
                 
         self.asteroids = surviving_asteroids
         
-        # 2. Randomly spawn new asteroids at the top
+        # 3. Check Laser-Asteroid Collisions
+        new_asteroids = []
+        lasers_to_remove = set()
+        
+        for ay, ax in self.asteroids:
+            destroyed = False
+            for i, (ly, lx) in enumerate(self.lasers):
+                if i in lasers_to_remove: 
+                    continue
+                
+                # Check for direct hit OR "tunneling" (they crossed paths this frame)
+                if lx == ax and (ly == ay or ly == ay - 1):
+                    destroyed = True
+                    lasers_to_remove.add(i)
+                    self.score += 2  # Bonus points for destroying an asteroid
+                    break
+                    
+            if not destroyed:
+                new_asteroids.append([ay, ax])
+                
+        # Update lists after collisions
+        self.asteroids = new_asteroids
+        self.lasers = [l for i, l in enumerate(self.lasers) if i not in lasers_to_remove]
+        
+        # 4. Spawn new asteroids
         if random.randint(1, 100) <= self.spawn_rate:
             spawn_x = random.randint(1, self.sw - 2)
             self.asteroids.append([1, spawn_x])
@@ -93,6 +122,15 @@ class DodgerGame:
             self.stdscr.addstr(self.sh // 2, self.sw // 2 - 4, " PAUSED ")
         self.stdscr.attroff(curses.color_pair(3))
 
+        # Draw Lasers (New)
+        self.stdscr.attron(curses.color_pair(4))
+        for ly, lx in self.lasers:
+            try:
+                self.stdscr.addch(ly, lx, '|')
+            except curses.error:
+                pass
+        self.stdscr.attroff(curses.color_pair(4))
+
         # Draw Asteroids
         self.stdscr.attron(curses.color_pair(2))
         for ay, ax in self.asteroids:
@@ -105,7 +143,6 @@ class DodgerGame:
         # Draw Player Ship
         self.stdscr.attron(curses.color_pair(1))
         try:
-            # We draw starting at x - 1 because the center coordinate is x
             self.stdscr.addstr(self.player_y, self.player_x - 1, self.ship_sprite)
         except curses.error:
             pass
