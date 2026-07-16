@@ -1,21 +1,44 @@
 import curses
 import random
 import time
+import json
 
 class DodgerGame:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.sh, self.sw = stdscr.getmaxyx()
+        self.score_file = "dodger_scores.json"
         
-        # Initialize colors
         curses.start_color()
-        curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)   # Player Ship
-        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Asteroids
-        curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)  # UI / Text
-        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK) # Lasers
-        curses.init_pair(5, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Power-ups
+        curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
+        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+        curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)
+        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+        curses.init_pair(5, curses.COLOR_GREEN, curses.COLOR_BLACK)
         
         self.reset_game()
+
+    def fetch_leaderboard(self):
+        try:
+            with open(self.score_file, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def commit_score(self):
+        if self.score == 0:
+            return
+            
+        board = self.fetch_leaderboard()
+        board.append(self.score)
+        board.sort(reverse=True)
+        top_five = board[:5]
+        
+        try:
+            with open(self.score_file, "w") as f:
+                json.dump(top_five, f)
+        except IOError:
+            pass
 
     def reset_game(self):
         self.stdscr.clear()
@@ -29,22 +52,22 @@ class DodgerGame:
         self.player_y = self.sh - 2
         self.ship_sprite = "<A>" 
         
-        self.asteroids = []
-        self.lasers = []
-        self.max_lasers = 3  
+        self.rocks = []
+        self.beams = []
+        self.max_beams = 3  
         
-        self.powerups = []           
-        self.powerup_active = False  
-        self.powerup_end_time = 0    
+        self.buffs = []            
+        self.spread_active = False  
+        self.spread_expiry = 0     
 
     def process_input(self):
         next_key = self.stdscr.getch()
         
-        if next_key == ord('p') or next_key == ord('P'):
+        if next_key in (ord('p'), ord('P')):
             self.paused = not self.paused
             return
             
-        if next_key == ord('q') or next_key == ord('Q'):
+        if next_key in (ord('q'), ord('Q')):
             self.game_over = True
             return
 
@@ -54,145 +77,120 @@ class DodgerGame:
             elif next_key == curses.KEY_RIGHT:
                 self.player_x = min(self.sw - 4, self.player_x + 2)
             elif next_key == ord(' '):  
-                if self.powerup_active:
-                    # Allow up to 9 lasers on screen during Spread Shot
-                    if len(self.lasers) <= 6:
-                        self.lasers.append([self.player_y - 1, self.player_x - 1]) # Left
-                        self.lasers.append([self.player_y - 1, self.player_x])     # Center
-                        self.lasers.append([self.player_y - 1, self.player_x + 1]) # Right
+                if self.spread_active:
+                    if len(self.beams) <= 6:
+                        self.beams.append([self.player_y - 1, self.player_x - 1])
+                        self.beams.append([self.player_y - 1, self.player_x])     
+                        self.beams.append([self.player_y - 1, self.player_x + 1]) 
                 else:
-                    # Standard single shot
-                    if len(self.lasers) < self.max_lasers:
-                        self.lasers.append([self.player_y - 1, self.player_x])
+                    if len(self.beams) < self.max_beams:
+                        self.beams.append([self.player_y - 1, self.player_x])
 
     def update_logic(self):
-        if self.paused:
-            return
+        if self.paused: return
 
-        # 1. Move lasers up
-        surviving_lasers = []
-        for ly, lx in self.lasers:
-            ly -= 1
-            if ly > 0:  
-                surviving_lasers.append([ly, lx])
-        self.lasers = surviving_lasers
+        active_beams = []
+        for beam_y, beam_x in self.beams:
+            beam_y -= 1
+            if beam_y > 0:  
+                active_beams.append([beam_y, beam_x])
+        self.beams = active_beams
 
-        # 2. Move asteroids down & check player collision
-        surviving_asteroids = []
-        for ay, ax in self.asteroids:
-            ay += 1 
+        falling_rocks = []
+        for rock_y, rock_x in self.rocks:
+            rock_y += 1 
             
-            if ay == self.player_y and (self.player_x - 1 <= ax <= self.player_x + 1):
+            if rock_y == self.player_y and (self.player_x - 1 <= rock_x <= self.player_x + 1):
                 self.game_over = True
                 return
                 
-            if ay >= self.sh - 1:
+            if rock_y >= self.sh - 1:
                 self.score += 1
                 if self.score % 10 == 0:
                     self.spawn_rate = min(40, self.spawn_rate + 2)
                     self.speed = max(40, self.speed - 5)
             else:
-                surviving_asteroids.append([ay, ax])
+                falling_rocks.append([rock_y, rock_x])
                 
-        self.asteroids = surviving_asteroids
+        self.rocks = falling_rocks
         
-        # 3. Check Laser-Asteroid Collisions
-        new_asteroids = []
-        lasers_to_remove = set()
+        rocks_after_hit = []
+        spent_beams = set()
         
-        for ay, ax in self.asteroids:
+        for rock_y, rock_x in self.rocks:
             destroyed = False
-            for i, (ly, lx) in enumerate(self.lasers):
-                if i in lasers_to_remove: 
+            for idx, (beam_y, beam_x) in enumerate(self.beams):
+                if idx in spent_beams: 
                     continue
                 
-                # Check for direct hit OR "tunneling"
-                if lx == ax and (ly == ay or ly == ay - 1):
+                if beam_x == rock_x and (beam_y == rock_y or beam_y == rock_y - 1):
                     destroyed = True
-                    lasers_to_remove.add(i)
+                    spent_beams.add(idx)
                     self.score += 2  
                     
-                    # 15% chance to drop a 'Spread Shot' power-up
                     if random.random() < 0.15:
-                        self.powerups.append([ay, ax])
+                        self.buffs.append([rock_y, rock_x])
                     break
-                    
-            if not destroyed:
-                new_asteroids.append([ay, ax])
                 
-        self.asteroids = new_asteroids
-        self.lasers = [l for i, l in enumerate(self.lasers) if i not in lasers_to_remove]
+            if not destroyed:
+                rocks_after_hit.append([rock_y, rock_x])
+                
+        self.rocks = rocks_after_hit
+        self.beams = [b for idx, b in enumerate(self.beams) if idx not in spent_beams]
         
-        # 4. Move power-ups and check player collision
-        surviving_powerups = []
-        for py, px in self.powerups:
-            py += 1
-            if py == self.player_y and (self.player_x - 1 <= px <= self.player_x + 1):
-                # Player caught it! Activate the buff for 5 seconds
-                self.powerup_active = True
-                self.powerup_end_time = time.time() + 5.0 
+        falling_buffs = []
+        for buff_y, buff_x in self.buffs:
+            buff_y += 1
+            if buff_y == self.player_y and (self.player_x - 1 <= buff_x <= self.player_x + 1):
+                self.spread_active = True
+                self.spread_expiry = time.time() + 5.0 
                 self.score += 5
-            elif py < self.sh - 1:
-                surviving_powerups.append([py, px])
-        self.powerups = surviving_powerups
+            elif buff_y < self.sh - 1:
+                falling_buffs.append([buff_y, buff_x])
+        self.buffs = falling_buffs
 
-        # Turn off the buff if the timer runs out
-        if self.powerup_active and time.time() > self.powerup_end_time:
-            self.powerup_active = False
+        if self.spread_active and time.time() > self.spread_expiry:
+            self.spread_active = False
         
-        # 5. Spawn new asteroids
         if random.randint(1, 100) <= self.spawn_rate:
             spawn_x = random.randint(1, self.sw - 2)
-            self.asteroids.append([1, spawn_x])
+            self.rocks.append([1, spawn_x])
 
     def draw(self):
         self.stdscr.clear()
         
-        # Draw Border, Score, and Ammo
         self.stdscr.attron(curses.color_pair(3))
         self.stdscr.border(0)
-        
         self.stdscr.addstr(0, 2, f" Score: {self.score} ")
         
-        # Ammo Gauge
-        if self.powerup_active:
+        if self.spread_active:
             self.stdscr.addstr(0, 15, " Shots: [ SPREAD ] ")
         else:
-            available_ammo = self.max_lasers - len(self.lasers)
+            available_ammo = self.max_beams - len(self.beams)
             self.stdscr.addstr(0, 15, f" Shots: {'|' * available_ammo:<3} ")
             
         if self.paused:
             self.stdscr.addstr(self.sh // 2, self.sw // 2 - 4, " PAUSED ")
         self.stdscr.attroff(curses.color_pair(3))
 
-        # Draw Lasers 
         self.stdscr.attron(curses.color_pair(4))
-        for ly, lx in self.lasers:
-            try:
-                self.stdscr.addch(ly, lx, '|')
-            except curses.error:
-                pass
+        for beam_y, beam_x in self.beams:
+            try: self.stdscr.addch(beam_y, beam_x, '|')
+            except curses.error: pass
         self.stdscr.attroff(curses.color_pair(4))
 
-        # Draw Power-ups
         self.stdscr.attron(curses.color_pair(5))
-        for py, px in self.powerups:
-            try:
-                self.stdscr.addch(py, px, 'W')
-            except curses.error:
-                pass
+        for buff_y, buff_x in self.buffs:
+            try: self.stdscr.addch(buff_y, buff_x, 'W')
+            except curses.error: pass
         self.stdscr.attroff(curses.color_pair(5))
 
-        # Draw Asteroids
         self.stdscr.attron(curses.color_pair(2))
-        for ay, ax in self.asteroids:
-            try:
-                self.stdscr.addch(ay, ax, '*')
-            except curses.error:
-                pass
+        for rock_y, rock_x in self.rocks:
+            try: self.stdscr.addch(rock_y, rock_x, '*')
+            except curses.error: pass
         self.stdscr.attroff(curses.color_pair(2))
 
-        # Draw Player Ship
         self.stdscr.attron(curses.color_pair(1))
         try:
             self.stdscr.addstr(self.player_y, self.player_x - 1, self.ship_sprite)
@@ -203,17 +201,30 @@ class DodgerGame:
         self.stdscr.refresh()
 
     def show_game_over_screen(self):
+        self.commit_score()
+        board = self.fetch_leaderboard()
+        
         self.stdscr.clear()
         self.stdscr.attron(curses.color_pair(3))
         self.stdscr.border(0)
         
-        msg1 = " CRASHED! "
-        msg2 = f" Final Score: {self.score} "
-        msg3 = " Press 'R' to Restart or 'Q' to Quit "
+        center_y = self.sh // 2
         
-        self.stdscr.addstr(self.sh // 2 - 1, (self.sw - len(msg1)) // 2, msg1)
-        self.stdscr.addstr(self.sh // 2, (self.sw - len(msg2)) // 2, msg2)
-        self.stdscr.addstr(self.sh // 2 + 1, (self.sw - len(msg3)) // 2, msg3)
+        msg_crash = " CRASHED! "
+        msg_score = f" Final Score: {self.score} "
+        
+        self.stdscr.addstr(center_y - 6, (self.sw - len(msg_crash)) // 2, msg_crash)
+        self.stdscr.addstr(center_y - 5, (self.sw - len(msg_score)) // 2, msg_score)
+        
+        if board:
+            self.stdscr.addstr(center_y - 3, (self.sw - 13) // 2, "TOP 5 SCORES:")
+            for rank, run_score in enumerate(board, 1):
+                row = f"{rank}. {run_score}"
+                self.stdscr.addstr(center_y - 2 + rank, (self.sw - len(row)) // 2, row)
+
+        msg_prompt = " Press 'R' to Restart or 'Q' to Quit "
+        self.stdscr.addstr(center_y + 5, (self.sw - len(msg_prompt)) // 2, msg_prompt)
+        
         self.stdscr.attroff(curses.color_pair(3))
         self.stdscr.refresh()
         
@@ -237,6 +248,8 @@ class DodgerGame:
                 self.update_logic()
             if not self.game_over:
                 self.draw()
+            else:
+                self.show_game_over_screen()
 
 def main(stdscr):
     game = DodgerGame(stdscr)
